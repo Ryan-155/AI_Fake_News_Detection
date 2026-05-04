@@ -3,7 +3,10 @@ import pickle
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
+import os
 
+st.write("FILES IN APP:")
+st.write(os.listdir())
 
 # ==============================
 # 🔥 LOAD ALL MODELS (CACHED)
