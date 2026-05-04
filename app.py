@@ -3,7 +3,7 @@ import pickle
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-with open("vectorizer.pkl", "rb") as f:
+with open("vectorizer_v2.pkl", "rb") as f:
     vectorizer = pickle.load(f)
 
 st.write("TYPE:", type(vectorizer))
