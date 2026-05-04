@@ -1,129 +1,85 @@
-import streamlit as st
+import gradio as gr
 import pickle
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 
-import os
+# =========================
+# LOAD MODELS
+# =========================
+vectorizer = pickle.load(open("vectorizer.pkl", "rb"))
+corpus = pickle.load(open("corpus.pkl", "rb"))
+corpus_embeddings = np.load("embeddings.npy")
 
-st.write("FILES IN APP:")
-st.write(os.listdir())
+from sentence_transformers import SentenceTransformer
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# ==============================
-# 🔥 LOAD ALL MODELS (CACHED)
-# ==============================
-@st.cache_resource
-def load_models():
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
 
-    # ---------- CORE FILES ----------
-    with open("vectorizer.pkl", "rb") as f:
-        vectorizer = pickle.load(f)
+nli_model = pipeline(
+    "text-classification",
+    model="facebook/bart-large-mnli",
+    device=-1
+)
 
-    with open("corpus.pkl", "rb") as f:
-        corpus = pickle.load(f)
-
-    corpus_embeddings = np.load("embeddings.npy")
-
-    with open("config.pkl", "rb") as f:
-        config = pickle.load(f)
-
-    # ---------- EMBEDDING MODEL ----------
-    from sentence_transformers import SentenceTransformer
-    embed_model = SentenceTransformer('all-MiniLM-L6-v2')
-
-    # ---------- NLI MODEL ----------
-    from transformers import pipeline
-    nli_model = pipeline(
-        "text-classification",
-        model="facebook/bart-large-mnli",
-        device=-1
-    )
-
-    # ---------- LLM (LIGHTWEIGHT FOR STREAMLIT) ----------
-    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-
-    llm_name = "google/flan-t5-small"
-
-    tokenizer = AutoTokenizer.from_pretrained(llm_name)
-    llm = AutoModelForSeq2SeqLM.from_pretrained(llm_name)
-
-    return (
-        vectorizer,
-        corpus,
-        corpus_embeddings,
-        config,
-        embed_model,
-        nli_model,
-        tokenizer,
-        llm
-    )
+llm_name = "google/flan-t5-small"
+tokenizer = AutoTokenizer.from_pretrained(llm_name)
+llm = AutoModelForSeq2SeqLM.from_pretrained(llm_name)
 
 
-vectorizer, corpus, corpus_embeddings, config, embed_model, nli_model, tokenizer, llm = load_models()
-
-# ==============================
-# 🔍 RETRIEVAL MODULE
-# ==============================
+# =========================
+# RETRIEVAL
+# =========================
 def retrieve(claim, k=5):
-
     claim_vec = vectorizer.transform([claim])
     tfidf_scores = cosine_similarity(claim_vec, vectorizer.transform(corpus))[0]
 
     claim_emb = embed_model.encode([claim])
-    semantic_scores = cosine_similarity(claim_emb, corpus_embeddings)[0]
+    sem_scores = cosine_similarity(claim_emb, corpus_embeddings)[0]
 
-    scores = tfidf_scores + semantic_scores
-    top_k_idx = scores.argsort()[-k:][::-1]
+    scores = tfidf_scores + sem_scores
+    top_k = scores.argsort()[-k:][::-1]
 
-    return [corpus[i] for i in top_k_idx]
+    return [corpus[i] for i in top_k]
 
 
-# ==============================
-# 🧠 CREDIBILITY SCORE
-# ==============================
-def credibility_score(evidence):
+# =========================
+# CREDIBILITY
+# =========================
+def credibility(text):
     score = 0.6
-    text = evidence.lower()
+    t = text.lower()
 
-    if "wikipedia" in text:
+    if "wikipedia" in t:
         score += 0.3
-    if "study" in text or "research" in text:
+    if "study" in t or "research" in t:
         score += 0.1
-    if len(text) > 200:
-        score += 0.05
 
     return min(score, 1.0)
 
 
-# ==============================
-# 🧪 PREDICTION ENGINE
-# ==============================
+# =========================
+# PREDICTION
+# =========================
 def predict(claim):
 
     evidences = retrieve(claim)
 
     final_score = 0
-    details = []
-
     for ev in evidences:
 
         result = nli_model(f"{claim} </s></s> {ev}")[0]
 
         label = result["label"]
-        confidence = result["score"]
+        conf = result["score"]
 
         if label == "ENTAILMENT":
-            n = 1
+            s = 1
         elif label == "CONTRADICTION":
-            n = -1
+            s = -1
         else:
-            n = 0
+            s = 0
 
-        cred = credibility_score(ev)
-
-        weighted_score = n * confidence * cred
-        final_score += weighted_score
-
-        details.append(ev)
+        final_score += s * conf * credibility(ev)
 
     if final_score > 0.5:
         verdict = "REAL"
@@ -132,57 +88,48 @@ def predict(claim):
     else:
         verdict = "UNCERTAIN"
 
-    return verdict, final_score, details
+    return verdict, final_score, "\n\n".join(evidences)
 
 
-# ==============================
-# 🧾 LLM EXPLANATION MODULE
-# ==============================
-def generate_explanation(claim, verdict, evidences):
+# =========================
+# LLM EXPLANATION
+# =========================
+def explain(claim):
 
-    context = "\n".join(evidences[:3])
+    verdict, score, evidences = predict(claim)
 
     prompt = f"""
-You are a fact-checking assistant.
-
 Claim: {claim}
 Verdict: {verdict}
 
 Evidence:
-{context}
+{evidences}
 
-Explain in simple terms why this claim is classified this way.
+Explain why this is classified as {verdict}.
 """
 
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True)
-
     output = llm.generate(**inputs, max_new_tokens=120)
 
-    return tokenizer.decode(output[0], skip_special_tokens=True)
+    explanation = tokenizer.decode(output[0], skip_special_tokens=True)
+
+    return verdict, score, evidences, explanation
 
 
-# ==============================
-# 🌐 STREAMLIT UI
-# ==============================
-st.title("🧠 AI Fake News Detection System")
+# =========================
+# GRADIO UI
+# =========================
+demo = gr.Interface(
+    fn=explain,
+    inputs=gr.Textbox(label="Enter News Claim"),
+    outputs=[
+        gr.Textbox(label="Verdict"),
+        gr.Number(label="Score"),
+        gr.Textbox(label="Evidence"),
+        gr.Textbox(label="AI Explanation")
+    ],
+    title="🧠 AI Fake News Detection System",
+    description="Retrieval + NLI + Credibility + LLM Explanation"
+)
 
-claim = st.text_input("Enter a news claim:")
-
-if st.button("Analyze"):
-
-    verdict, score, evidences = predict(claim)
-
-    explanation = generate_explanation(claim, verdict, evidences)
-
-    st.subheader("Prediction")
-    st.write(verdict)
-
-    st.subheader("Confidence Score")
-    st.write(score)
-
-    st.subheader("Evidence Used")
-    for e in evidences:
-        st.write("-", e)
-
-    st.subheader("AI Explanation")
-    st.write(explanation)
+demo.launch()
