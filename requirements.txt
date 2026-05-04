@@ -5,4 +5,4 @@ scikit-learn==1.4.2
 sentence-transformers
 transformers==4.40.1
 torch
-joblib
+
